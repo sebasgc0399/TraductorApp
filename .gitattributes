@@ -1,0 +1,9 @@
+# Finales de línea consistentes en el repo; los scripts de shell siempre con LF.
+* text=auto
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.ttf binary
+*.png binary
+*.jks binary

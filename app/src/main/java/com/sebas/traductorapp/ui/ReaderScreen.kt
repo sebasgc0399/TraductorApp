@@ -1,6 +1,13 @@
 package com.sebas.traductorapp.ui
 
 import androidx.activity.compose.BackHandler
+import com.sebas.traductorapp.reader.EditRequest
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -123,9 +130,52 @@ fun ReaderScreen(
                 bridgeSupported = holder.bridgeSupported,
                 onRetry = holder.session::retry,
                 onOpenSettings = onOpenSettings,
+                onNext = state.nextUrl?.let { url -> { holder.webView()?.loadUrl(url) } },
             )
         }
     }
+
+    state.editing?.let { req ->
+        EditTranslationDialog(
+            request = req,
+            onSave = holder.session::saveEdit,
+            onDismiss = holder.session::dismissEdit,
+        )
+    }
+}
+
+/** Corrección manual de un globo: se guarda en la caché de la serie y se mantiene al releer. */
+@Composable
+private fun EditTranslationDialog(request: EditRequest, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember(request) { mutableStateOf(request.es) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Corregir traducción") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Original", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    request.en,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Traducción") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Se aplica a todos los globos con el mismo texto de esta serie. \"Retraducir\" en el glosario la borra.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Guardar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+    )
 }
 
 @Composable
@@ -134,6 +184,7 @@ private fun ReaderStatusBar(
     bridgeSupported: Boolean,
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit,
+    onNext: (() -> Unit)?,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -170,6 +221,7 @@ private fun ReaderStatusBar(
             when {
                 state.needsApiKey -> TextButton(onClick = onOpenSettings) { Text("Configurar") }
                 state.message != null -> TextButton(onClick = onRetry) { Text("Reintentar") }
+                onNext != null -> TextButton(onClick = onNext) { Text("Siguiente →") }
             }
         }
     }

@@ -115,7 +115,6 @@ fun GlossaryScreen(container: AppContainer, seriesKey: String, onBack: () -> Uni
                 latest.copy(
                     glossaryJson = container.json.encodeToString(GLOSSARY_LIST_SERIALIZER, edited + added),
                     summary = newSummary,
-                    updatedAt = System.currentTimeMillis(),
                 ),
             )
             added

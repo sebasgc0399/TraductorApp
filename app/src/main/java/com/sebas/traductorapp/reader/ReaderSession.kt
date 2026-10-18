@@ -11,6 +11,7 @@ import com.sebas.traductorapp.data.SeriesEntity
 import com.sebas.traductorapp.data.SpanishVariant
 import com.sebas.traductorapp.data.TextCacheEntity
 import com.sebas.traductorapp.data.UsageLogEntity
+import com.sebas.traductorapp.model.Bubble
 import com.sebas.traductorapp.model.ChapterInfo
 import com.sebas.traductorapp.model.GlossaryEntry
 import com.sebas.traductorapp.model.PageAnalysis
@@ -75,7 +76,14 @@ data class ReaderUiState(
     val barsVisible: Boolean = true,
     /** El siguiente capítulo ya está descargado, con OCR y traducido (al menos sus primeras páginas). */
     val nextReady: Boolean = false,
+    /** Enlace al siguiente capítulo detectado en la página (botón "Siguiente →"). */
+    val nextUrl: String? = null,
+    /** Globo que el usuario pidió corregir desde la mini barra de reader.js. */
+    val editing: EditRequest? = null,
 )
+
+/** Corrección manual de un globo: [en] es el texto del OCR, [es] la traducción actual. */
+data class EditRequest(val url: String, val bubbleId: Int, val en: String, val es: String)
 
 /**
  * Orquesta una sesión de lectura: recibe las imágenes que reporta reader.js, corre el OCR en orden de cercanía
@@ -179,7 +187,7 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
                 val old = settings
                 settings = s
                 _state.update { it.copy(needsApiKey = !s.hasApiKey) }
-                if (old.debugBoxes != s.debugBoxes) sendMode()
+                if (old.debugBoxes != s.debugBoxes || old.fontScale != s.fontScale) sendMode()
                 if (old.variant != s.variant) memo.clear()
                 if (old.apiKey != s.apiKey || old.model != s.model) {
                     translationPaused = false
@@ -262,6 +270,9 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
             "images" -> onImages(obj)
             "pos" -> onPosition(obj)
             "next" -> onNextLink(obj)
+            "edit" -> onEditRequest(obj)
+            // Mini barra de un globo abierta: se ocultan las barras para que nunca la tapen.
+            "menu" -> setBars(false)
         }
     }
 
@@ -416,7 +427,53 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
         val url = obj.str("url")?.takeIf { it.startsWith("http") } ?: return
         if (url == nextUrl) return
         nextUrl = url
+        _state.update { it.copy(nextUrl = url) }
         maybePrefetchNextChapter()
+    }
+
+    private fun onEditRequest(obj: JsonObject) {
+        val url = obj.str("url") ?: return
+        val id = obj["id"]?.jsonPrimitive?.intOrNull ?: return
+        val slot = pages[url] ?: return
+        // El texto en inglés sale del análisis propio, no del mensaje de la página.
+        val bubble = slot.analysis?.bubbles?.firstOrNull { it.id == id } ?: return
+        _state.update { it.copy(editing = EditRequest(url, id, bubble.text, slot.translations[id].orEmpty())) }
+    }
+
+    fun dismissEdit() {
+        _state.update { it.copy(editing = null) }
+    }
+
+    /**
+     * Guarda la corrección: se aplica a todos los globos abiertos con el mismo texto y queda en la caché de la serie
+     * (model = "manual"), así se mantiene al releer. "Retraducir" en el glosario también la borra.
+     */
+    fun saveEdit(text: String) {
+        val req = _state.value.editing ?: return
+        _state.update { it.copy(editing = null) }
+        val info = chapter ?: return
+        val slot = pages[req.url] ?: return
+        val bubble = slot.analysis?.bubbles?.firstOrNull { it.id == req.bubbleId } ?: return
+        val es = OutputText.clean(text)
+        val key = cacheKey(bubble.text)
+        memo[key] = es
+        for (s in pages.values) {
+            val a = s.analysis ?: continue
+            var changed = false
+            for (b in a.bubbles) {
+                if (cacheKey(b.text) != key) continue
+                s.translations[b.id] = es
+                s.pending.remove(b.id)
+                changed = true
+            }
+            if (changed) render(s)
+        }
+        refreshCounters()
+        scope.launch(Dispatchers.IO) {
+            db.textCache().insertAll(
+                listOf(TextCacheEntity(info.seriesKey, key, bubble.text, es, MANUAL_MODEL))
+            )
+        }
     }
 
     private fun resetPages() {
@@ -432,7 +489,7 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
         nextUrl = null
         nextInfo = null
         nextRequested = false
-        _state.update { it.copy(pagesTotal = 0, pagesDone = 0, currentPage = 0, nextReady = false) }
+        _state.update { it.copy(pagesTotal = 0, pagesDone = 0, currentPage = 0, nextReady = false, nextUrl = null, editing = null) }
     }
 
     // ---------- Selección por cercanía a la lectura ----------
@@ -641,23 +698,20 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
         val gen = generation
         slot.analysis = analysis
         slot.status = Status.READY
+        // Orden: memoria/caché (incluye correcciones manuales) y recién después el diccionario local.
         val unresolved = mutableListOf<Triple<Int, String, String>>()
         for (b in analysis.bubbles) {
-            val local = LocalDictionary.translate(b.text, settings.variant)
             val key = cacheKey(b.text)
-            when {
-                local != null -> slot.translations[b.id] = local
-                memo[key] != null -> slot.translations[b.id] = memo.getValue(key)
-                else -> unresolved += Triple(b.id, b.text, key)
-            }
+            val known = memo[key]
+            if (known != null) slot.translations[b.id] = known else unresolved += Triple(b.id, b.text, key)
         }
         if (unresolved.isNotEmpty()) {
             val keys = unresolved.map { it.third }.distinct()
             val cached = withContext(Dispatchers.IO) { db.textCache().getMany(info.seriesKey, keys) }
             if (generation != gen) return
             val byKey = cached.associate { it.textHash to OutputText.clean(it.translated) }
-            for ((id, _, key) in unresolved) {
-                val hit = byKey[key]
+            for ((id, text, key) in unresolved) {
+                val hit = byKey[key] ?: LocalDictionary.translate(text, settings.variant)
                 if (hit != null) {
                     slot.translations[id] = hit
                     memo[key] = hit
@@ -666,8 +720,29 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
                 }
             }
         }
-        if (!slot.next) render(slot)
+        if (!slot.next) {
+            render(slot)
+            renderNeighbors(slot)
+        }
         if (slot.pending.isNotEmpty()) translateWake.trySend(Unit)
+    }
+
+    private fun renderNeighbors(slot: PageSlot) {
+        val ordered = eligibleSlots()
+        val i = ordered.indexOf(slot)
+        if (i < 0) return
+        ordered.getOrNull(i - 1)?.takeIf { it.status == Status.READY }?.let(::render)
+        ordered.getOrNull(i + 1)?.takeIf { it.status == Status.READY }?.let(::render)
+    }
+
+    /** Cubiertas coordinadas con las páginas vecinas (ver [SeamCovers]). */
+    private fun seamAware(slot: PageSlot, a: PageAnalysis): List<RenderBubble> {
+        if (slot.next) return a.bubbles.map { RenderBubble(it, seamTop = false, seamBottom = false, cover = false) }
+        val ordered = eligibleSlots()
+        val i = ordered.indexOf(slot)
+        val prev = if (i > 0) ordered[i - 1].analysis else null
+        val next = if (i >= 0) ordered.getOrNull(i + 1)?.analysis else null
+        return SeamCovers.compute(a, prev, next)
     }
 
     // ---------- Traducción ----------
@@ -977,9 +1052,9 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
             val current = db.series().get(info.seriesKey) ?: return@withLock null
             val changed = change(current)
             if (changed == current) return@withLock current
-            val updated = changed.copy(updatedAt = System.currentTimeMillis())
-            db.series().upsert(updated)
-            updated
+            // updatedAt = última lectura ("Seguir leyendo"): un cambio de glosario o resumen no la mueve.
+            db.series().upsert(changed)
+            changed
         }
 
     private suspend fun logUsage(
@@ -1022,6 +1097,7 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
                 put("type", "mode")
                 put("showOriginal", _state.value.showOriginal)
                 put("debug", settings.debugBoxes)
+                put("fontScale", settings.fontScale.toDouble())
             }
         )
     }
@@ -1036,8 +1112,9 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
             put("type", "render")
             put("url", slot.url)
             putJsonArray("bubbles") {
-                for (b in a.bubbles) {
-                    val es = slot.translations[b.id]
+                for (rb in seamAware(slot, a)) {
+                    val b = rb.b
+                    val es = if (rb.cover) "" else slot.translations[b.id]
                     addJsonObject {
                         put("id", b.id)
                         put("x", b.left / w)
@@ -1050,7 +1127,17 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
                         put("uni", b.uniform)
                         put("en", b.text)
                         put("es", es.orEmpty())
-                        put("st", if (!es.isNullOrBlank()) "ok" else if (es != null) "skip" else "pending")
+                        put(
+                            "st",
+                            when {
+                                rb.cover -> "cover"
+                                !es.isNullOrBlank() -> "ok"
+                                es != null -> "skip"
+                                else -> "pending"
+                            },
+                        )
+                        if (rb.seamTop) put("seamT", true)
+                        if (rb.seamBottom) put("seamB", true)
                         put("conf", b.confidence.toDouble())
                     }
                 }
@@ -1075,6 +1162,7 @@ class ReaderSession(private val container: AppContainer) : ReaderWebListener {
         private const val LOOP_ERROR_DELAY_MS = 1000L
         private const val NEXT_IDX_BASE = 100_000
         private const val MIN_PAGES_FOR_NEXT = 6
+        private const val MANUAL_MODEL = "manual"
         private const val MAX_HTML_CHARS = 3_000_000
         private const val SUMMARY_MIN_LINES = 30
         private const val SUMMARY_MAX_LINES = 80

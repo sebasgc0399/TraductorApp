@@ -8,6 +8,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -17,15 +22,21 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sebas.traductorapp.reader.ReaderHolder
 import com.sebas.traductorapp.ui.GlossaryScreen
 import com.sebas.traductorapp.ui.HomeScreen
+import com.sebas.traductorapp.ui.OnboardingScreen
 import com.sebas.traductorapp.ui.ReaderScreen
 import com.sebas.traductorapp.ui.SettingsScreen
 import com.sebas.traductorapp.ui.TraductorTheme
 import com.sebas.traductorapp.ui.UsageScreen
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     private val sharedUrl = MutableStateFlow<String?>(null)
@@ -41,7 +52,7 @@ class MainActivity : ComponentActivity() {
         val container = (application as TraductorApplication).container
         setContent {
             TraductorTheme {
-                AppNav(container, sharedUrl)
+                AppRoot(container, sharedUrl)
             }
         }
     }
@@ -64,6 +75,38 @@ private sealed interface Route {
     data object Settings : Route
     data object Usage : Route
     data class Glossary(val seriesKey: String) : Route
+}
+
+/** Muestra la bienvenida si hace falta; el enlace compartido espera en [sharedUrl] hasta que termine. */
+@Composable
+private fun AppRoot(container: AppContainer, sharedUrl: MutableStateFlow<String?>) {
+    val doneFlow = remember { container.settings.settings.map { it.onboardingDone }.distinctUntilChanged() }
+    val done by doneFlow.collectAsStateWithLifecycle(initialValue = null)
+    // Una vez abierta, la bienvenida sigue hasta terminarla: guardar la key en el paso 2 marca la bandera
+    // como hecha (si nunca se escribió) y no debe saltarse el paso 3.
+    var onboardingOpen by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(done) {
+        if (done == false) onboardingOpen = true
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        if (done == null) {
+            // Mientras carga la primera lectura no se muestra nada, para no mostrar la bienvenida a quien ya la vio.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            )
+        } else {
+            // La app queda siempre debajo: abrir la bienvenida nunca destruye el lector ni la navegación.
+            AppNav(container, sharedUrl)
+            if (onboardingOpen || done == false) {
+                Surface(Modifier.fillMaxSize()) {
+                    OnboardingScreen(container = container, onFinish = { onboardingOpen = false })
+                }
+            }
+        }
+    }
 }
 
 @Composable

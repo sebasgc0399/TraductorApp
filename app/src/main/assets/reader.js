@@ -22,9 +22,15 @@
   // Los globos se agrandan una vez si el texto no cabe con una letra legible.
   var GROW_BELOW_PX = 10;
   var MAX_RENDERS = 400;
-  // Mantener pulsado un globo muestra el original.
+  // Mantener pulsado un globo abre la mini barra (original / editar).
   var PRESS_MS = 450;
   var PRESS_SLOP = 10;
+  var MENU_MS = 6000; // la barra se cierra sola tras este tiempo sin uso
+  var MENU_GAP = 8; // separación entre la barra y el globo / el borde de la pantalla
+  var MENU_FONT = "system-ui,-apple-system,'Segoe UI',Roboto,sans-serif";
+  // Tamaño de letra elegido en Ajustes (multiplica el máximo de cada globo).
+  var FONT_SCALE_MIN = 0.8;
+  var FONT_SCALE_MAX = 1.3;
   // Globos con altura de línea original parecida (±25 %) usan la misma letra.
   var SIMILAR_LH = 1.25;
 
@@ -54,11 +60,12 @@
     lastPos: '',
     renders: new Map(), // url (sin #) -> último payload render
     layers: new Set(),
-    mode: { showOriginal: false, debug: false },
+    mode: { showOriginal: false, debug: false, fontScale: 1 },
     scanTimer: 0,
     nextSent: '', // último enlace "siguiente" enviado...
     nextKey: '', // ...y la página a la que pertenece
-    press: null // pulsación larga en curso
+    press: null, // pulsación larga en curso
+    menu: null // mini barra abierta: {el, box, tog, edit, timer}
   };
 
   try {
@@ -634,6 +641,92 @@
     'word-break': 'normal'
   };
 
+  // Mini barra: fija sobre la pantalla (se cierra al hacer scroll), aislada de los estilos del sitio.
+  var MENU_CSS = {
+    all: 'initial',
+    position: 'fixed',
+    left: '0px',
+    top: '0px',
+    width: 'auto',
+    height: 'auto',
+    display: 'flex',
+    'flex-direction': 'row',
+    'align-items': 'stretch',
+    margin: '0',
+    padding: '0',
+    border: '0',
+    'box-sizing': 'border-box',
+    overflow: 'hidden',
+    background: 'rgba(22,22,26,0.94)',
+    'border-radius': '22px',
+    'box-shadow': '0 4px 14px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.3)',
+    'z-index': '2147483647',
+    'pointer-events': 'auto',
+    direction: 'ltr',
+    'unicode-bidi': 'isolate',
+    'writing-mode': 'horizontal-tb',
+    'white-space': 'nowrap',
+    'transform-origin': '0 0',
+    transform: 'none',
+    opacity: '0',
+    transition: 'opacity 120ms ease-out',
+    'touch-action': 'manipulation',
+    'user-select': 'none',
+    '-webkit-user-select': 'none',
+    '-webkit-touch-callout': 'none',
+    '-webkit-tap-highlight-color': 'transparent',
+    '-webkit-text-size-adjust': '100%',
+    'text-size-adjust': '100%'
+  };
+
+  var MENU_BTN_CSS = {
+    all: 'initial',
+    display: 'flex',
+    'align-items': 'center',
+    'justify-content': 'center',
+    'box-sizing': 'border-box',
+    height: '44px',
+    'min-height': '40px',
+    'min-width': '72px',
+    padding: '0 18px',
+    margin: '0',
+    border: '0',
+    background: 'transparent',
+    color: '#ffffff',
+    'font-family': MENU_FONT,
+    'font-size': '15px',
+    'font-weight': '600',
+    'font-style': 'normal',
+    'line-height': '1',
+    'letter-spacing': '0.01em',
+    'text-align': 'center',
+    'text-transform': 'none',
+    'text-decoration': 'none',
+    'text-shadow': 'none',
+    'white-space': 'nowrap',
+    direction: 'ltr',
+    cursor: 'pointer',
+    'pointer-events': 'auto',
+    'touch-action': 'manipulation',
+    'user-select': 'none',
+    '-webkit-user-select': 'none',
+    '-webkit-touch-callout': 'none',
+    '-webkit-tap-highlight-color': 'transparent',
+    '-webkit-text-size-adjust': '100%',
+    'text-size-adjust': '100%'
+  };
+
+  var MENU_SEP_CSS = {
+    all: 'initial',
+    display: 'block',
+    flex: '0 0 1px',
+    width: '1px',
+    margin: '11px 0',
+    padding: '0',
+    background: 'rgba(255,255,255,0.28)',
+    'pointer-events': 'none'
+  };
+
   var ro = null;
   try {
     ro = new ResizeObserver(
@@ -777,6 +870,7 @@
   }
 
   function dropLayer(layer) {
+    closeMenuIn(layer);
     S.layers.delete(layer);
     var img = layer.__trImg;
     if (img && img.__trLayer === layer) {
@@ -833,12 +927,18 @@
 
   function build(layer, p) {
     if (S.press && S.press.el.parentNode === layer) cancelPress();
+    // un render nuevo (p. ej. tras editar) reemplaza los globos: la barra no sigue abierta
+    closeMenuIn(layer);
+    // la URL tal como la mandó Kotlin, para devolverla en "edit"
+    if (p && typeof p.url === 'string') layer.__trUrl = p.url;
     layer.textContent = '';
     var bs = (p && Array.isArray(p.bubbles) && p.bubbles) || [];
     var i;
     for (i = 0; i < bs.length; i++) {
       var b = bs[i];
-      if (b && b.st === 'ok' && typeof b.es === 'string' && b.es.trim()) layer.appendChild(makeBubble(b));
+      if (!b) continue;
+      if (b.st === 'cover') layer.appendChild(makeCover(b));
+      else if (b.st === 'ok' && typeof b.es === 'string' && b.es.trim()) layer.appendChild(makeBubble(b));
     }
     if (S.mode.debug) {
       for (i = 0; i < bs.length; i++) {
@@ -847,6 +947,32 @@
     }
     layer.__trFitW = -1;
     layer.__trFitH = -1;
+  }
+
+  // Del lado de un corte entre imágenes las esquinas van rectas: si no, por la curva se asoma el original.
+  function seamCorners(el, b) {
+    if (b.seamT === true) css(el, { 'border-top-left-radius': '0', 'border-top-right-radius': '0' });
+    if (b.seamB === true) css(el, { 'border-bottom-left-radius': '0', 'border-bottom-right-radius': '0' });
+    // sin borde difuminado: en el corte el difuminado deja ver un rastro del original
+    if (b.seamT === true || b.seamB === true) css(el, { 'mask-image': 'none', '-webkit-mask-image': 'none' });
+  }
+
+  // Cubierta sin texto (continuación de un globo partido por el corte): no recibe toques, la página sigue igual.
+  function makeCover(b) {
+    var el = document.createElement('div');
+    el.__trOwn = true;
+    var bg = color(b.bg, '#ffffff');
+    css(el, BUBBLE_CSS);
+    if (b.uni === true) {
+      css(el, UNI_CSS);
+      css(el, { background: bg, 'box-shadow': '0 0 2px 1px ' + bg });
+    } else {
+      css(el, { background: rgba(bg, 0.9) });
+    }
+    seamCorners(el, b);
+    css(el, { 'pointer-events': 'none', cursor: 'default' });
+    placeBubble(el, { x: +b.x || 0, y: +b.y || 0, w: +b.w || 0, h: +b.h || 0 });
+    return el;
   }
 
   function makeBubble(b) {
@@ -858,6 +984,9 @@
     el.__trLh = +b.lh || 0;
     el.__trEs = String(b.es);
     el.__trEn = typeof b.en === 'string' ? b.en : '';
+    el.__trId = b.id != null ? b.id : null;
+    // solo los globos traducidos ("ok") se pueden editar
+    el.__trOk = b.st === 'ok' && !!el.__trEs.trim();
     el.__trShowEn = false;
     el.__trMax = 12;
     el.__trFit = 0; // tamaño ajustado del español (px), base de la normalización
@@ -874,6 +1003,7 @@
     } else {
       css(el, { background: rgba(bg, 0.9) });
     }
+    seamCorners(el, b);
     placeBubble(el, el.__trGeom);
     var t = document.createElement('div');
     t.__trOwn = true;
@@ -906,8 +1036,13 @@
     return d;
   }
 
-  // ---------- Pulsación larga: original en inglés ----------
+  // ---------- Pulsación larga: mini barra (original / editar) ----------
   // Nunca se cancela pointerdown/touchstart: el scroll y los toques normales siguen como siempre.
+
+  // La barra tiene algo que ofrecer: el inglés para alternar o el español para editar.
+  function canMenu(el) {
+    return !!el.__trEn || el.__trOk === true;
+  }
 
   function cancelPress() {
     var p = S.press;
@@ -921,11 +1056,208 @@
     if (!p) return;
     if (p.timer) clearTimeout(p.timer);
     var el = p.el;
-    if (!el || !el.isConnected || !el.__trEn) return;
+    if (!el || !el.isConnected || !canMenu(el)) return;
     // el click que el navegador pueda mandar al soltar no debe llegar a la página
     el.__trSwallow = true;
-    toggleBubble(el);
+    showMenu(el);
   }
+
+  function toggleLabel(el) {
+    return el.__trShowEn ? 'Traducción' : 'Original';
+  }
+
+  function menuButton(label, act) {
+    var b = document.createElement('div');
+    b.__trOwn = true;
+    b.__trAct = act;
+    b.setAttribute('role', 'button');
+    css(b, MENU_BTN_CSS);
+    b.textContent = label;
+    return b;
+  }
+
+  function hideMenu() {
+    var mn = S.menu;
+    S.menu = null;
+    if (!mn) return;
+    if (mn.timer) clearTimeout(mn.timer);
+    if (mn.box.parentNode) {
+      try {
+        mn.box.parentNode.removeChild(mn.box);
+      } catch (e) {}
+    }
+  }
+
+  // Cierra la barra si su globo pertenece a esa capa (o ya no está en la página).
+  function closeMenuIn(layer) {
+    var mn = S.menu;
+    if (mn && (mn.el.parentNode === layer || !mn.el.isConnected)) hideMenu();
+  }
+
+  // (Re)inicia la cuenta de inactividad.
+  function armMenu() {
+    var mn = S.menu;
+    if (!mn) return;
+    if (mn.timer) clearTimeout(mn.timer);
+    mn.timer = setTimeout(safe(hideMenu), MENU_MS);
+  }
+
+  function showMenu(el) {
+    hideMenu();
+    // Kotlin oculta sus barras para que no tapen la mini barra
+    post({ type: 'menu' });
+    var root = document.documentElement;
+    if (!root || !el.isConnected) return;
+    var box = document.createElement('div');
+    box.__trOwn = true;
+    box.setAttribute('role', 'toolbar');
+    css(box, MENU_CSS);
+    var mn = { el: el, box: box, tog: null, edit: null, timer: 0 };
+    if (el.__trEn) {
+      mn.tog = menuButton(toggleLabel(el), 'toggle');
+      box.appendChild(mn.tog);
+    }
+    if (el.__trOk) {
+      if (mn.tog) {
+        var sep = document.createElement('div');
+        sep.__trOwn = true;
+        css(sep, MENU_SEP_CSS);
+        box.appendChild(sep);
+      }
+      mn.edit = menuButton('Editar', 'edit');
+      box.appendChild(mn.edit);
+    }
+    if (!mn.tog && !mn.edit) return;
+    S.menu = mn;
+    // fuera de la capa (que tiene "contain" y puede quedar recortada por el sitio)
+    root.appendChild(box);
+    placeMenu();
+    // la medición de placeMenu ya fijó la opacidad 0: el cambio se anima
+    css(box, { opacity: '1' });
+    armMenu();
+  }
+
+  // Encima del globo y centrada; debajo si arriba no hay sitio en la pantalla.
+  // Con zoom de pellizco se compensa la escala para que conserve su tamaño en pantalla.
+  function placeMenu() {
+    var mn = S.menu;
+    if (!mn) return;
+    var box = mn.box;
+    var vv = window.visualViewport;
+    var sc = vv && isFinite(vv.scale) && vv.scale > 0 ? vv.scale : 1;
+    var k = Math.min(4, Math.max(0.25, 1 / sc));
+    if (Math.abs(k - 1) < 0.01) k = 1;
+    // lecturas
+    var de = document.documentElement;
+    var r = mn.el.getBoundingClientRect();
+    var tw = box.offsetWidth * k;
+    var th = box.offsetHeight * k;
+    var vx = vv ? vv.offsetLeft : 0;
+    var vy = vv ? vv.offsetTop : 0;
+    var vw = vv ? vv.width : de.clientWidth || window.innerWidth || 0;
+    var vh = vv ? vv.height : de.clientHeight || window.innerHeight || 0;
+    var m = MENU_GAP * k;
+    var left = (r.left + r.right) / 2 - tw / 2;
+    if (vw >= tw + 2 * m) left = Math.min(Math.max(left, vx + m), vx + vw - tw - m);
+    else left = vx + (vw - tw) / 2;
+    var top = r.top - th - m;
+    if (top < vy + m) {
+      top = r.bottom + m;
+      // globo más alto que la pantalla: la barra queda dentro, aunque lo pise
+      if (top + th > vy + vh - m) top = Math.max(vy + m, vy + vh - th - m);
+    }
+    // escrituras
+    css(box, {
+      left: Math.round(left) + 'px',
+      top: Math.round(top) + 'px',
+      transform: k === 1 ? 'none' : 'scale(' + k + ')'
+    });
+  }
+
+  function menuButtonOf(n) {
+    var mn = S.menu;
+    for (; n && mn && n !== mn.box; n = n.parentNode) if (n.__trAct) return n;
+    return null;
+  }
+
+  function inMenu(n) {
+    var mn = S.menu;
+    if (!mn) return false;
+    for (; n; n = n.parentNode) if (n === mn.box) return true;
+    return false;
+  }
+
+  function pressLook(b) {
+    var mn = S.menu;
+    if (!mn) return;
+    var list = [mn.tog, mn.edit];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i]) css(list[i], { background: list[i] === b ? 'rgba(255,255,255,0.18)' : 'transparent' });
+    }
+  }
+
+  function menuAction(b) {
+    var mn = S.menu;
+    if (!mn || !b) return;
+    var el = mn.el;
+    if (!el.isConnected) {
+      hideMenu();
+      return;
+    }
+    if (b.__trAct === 'toggle') {
+      toggleBubble(el);
+      if (mn.tog) mn.tog.textContent = toggleLabel(el);
+      // el rótulo cambia de ancho (y el globo puede haber crecido): se recoloca
+      placeMenu();
+      armMenu();
+    } else if (b.__trAct === 'edit') {
+      hideMenu();
+      var L = el.parentNode;
+      post({
+        type: 'edit',
+        url: (L && (L.__trUrl || L.__trKey)) || '',
+        id: el.__trId,
+        en: el.__trEn,
+        es: el.__trEs
+      });
+    }
+  }
+
+  // Captura en window (registrada antes que cualquier script del sitio): los eventos de la barra
+  // no llegan a la página; un toque en cualquier otro lado la cierra sin alterar ese toque.
+  var onMenuEvent = safe(function (e) {
+    var mn = S.menu;
+    if (!mn) return;
+    var t = e.type;
+    if (!inMenu(e.target)) {
+      if (t === 'pointerdown') hideMenu();
+      return;
+    }
+    e.stopImmediatePropagation();
+    if ((t === 'click' || t === 'dblclick' || t === 'auxclick' || t === 'contextmenu') && e.cancelable) {
+      e.preventDefault();
+    }
+    if (t === 'pointerdown') {
+      armMenu();
+      pressLook(menuButtonOf(e.target));
+    } else if (t === 'pointerup' || t === 'pointercancel') {
+      pressLook(null);
+    } else if (t === 'click') {
+      menuAction(menuButtonOf(e.target));
+    }
+  });
+
+  // Solo cuentan los scrolls que mueven el globo (la página o un contenedor suyo):
+  // un carrusel de anuncios que se desplaza solo no cierra la barra.
+  var onMenuScroll = safe(function (e) {
+    var mn = S.menu;
+    if (!mn) return;
+    var t = e.target;
+    if (!t || t === document || t === window || t.nodeType !== 1 || t === document.documentElement ||
+        t === document.body || t.contains(mn.el)) {
+      hideMenu();
+    }
+  });
 
   var onPressDown = safe(function (e) {
     if (e.isPrimary === false) {
@@ -937,7 +1269,7 @@
     var el = e.currentTarget;
     cancelPress();
     el.__trSwallow = false;
-    if (!el.__trEn) return;
+    if (!canMenu(el)) return;
     S.press = { el: el, id: e.pointerId, x: e.clientX, y: e.clientY, timer: setTimeout(safe(firePress), PRESS_MS) };
   });
 
@@ -1097,7 +1429,7 @@
           var el = kids[k];
           if (!el.__trBubble) continue;
           var lh = el.__trLh > 0 ? el.__trLh * G.h : 14;
-          el.__trMax = Math.min(40, Math.max(9, lh));
+          el.__trMax = Math.min(40, Math.max(9, lh)) * S.mode.fontScale;
           // el ajuste anterior ya no vale; los globos en inglés quedan fuera de la normalización
           el.__trFit = 0;
           padText(el);
@@ -1196,10 +1528,12 @@
     }
     var toGrow = [];
     var toWrap = [];
+    // con letra más chica elegida en Ajustes, el umbral de "ilegible" baja en proporción
+    var growBelow = GROW_BELOW_PX * Math.min(1, S.mode.fontScale);
     for (i = 0; i < st.length; i++) {
       s = st[i];
       if (!s.shown) continue;
-      if (s.lo < GROW_BELOW_PX && s.el.__trGeom && !s.el.__trGrown) toGrow.push(s.el);
+      if (s.lo < growBelow && s.el.__trGeom && !s.el.__trGrown) toGrow.push(s.el);
       else if (!fits(s.el)) toWrap.push(s.el);
     }
     for (i = 0; i < st.length; i++) {
@@ -1269,19 +1603,31 @@
     }
   }
 
+  // "fontScale" de 0.8 a 1.3; si falta o no es un número válido, 1.
+  function fontScaleOf(v) {
+    var n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? +v : NaN;
+    if (!isFinite(n) || n <= 0) return 1;
+    return Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, n));
+  }
+
   function applyMode(m) {
     var so = !!m.showOriginal;
     var dbg = !!m.debug;
+    var fsc = fontScaleOf(m.fontScale);
     var dbgChanged = dbg !== S.mode.debug;
     var soChanged = so !== S.mode.showOriginal;
+    var fsChanged = Math.abs(fsc - S.mode.fontScale) > 1e-6;
     S.mode.showOriginal = so;
     S.mode.debug = dbg;
+    S.mode.fontScale = fsc;
     if (so) cancelPress();
+    if (so || soChanged || dbgChanged || fsChanged) hideMenu();
     S.layers.forEach(function (layer) {
       if (dbgChanged) build(layer, S.renders.get(layer.__trKey));
       if (soChanged) applyVisibility(layer);
     });
-    if (!so) syncAll(soChanged || dbgChanged);
+    // un cambio de letra recalcula el máximo de cada globo, lo reajusta y vuelve a normalizar la página
+    if (!so) syncAll(soChanged || dbgChanged || fsChanged);
   }
 
   function applyRender(m) {
@@ -1363,6 +1709,17 @@
   }, 200);
 
   try {
+    var menuPassive = ['pointerdown', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend',
+      'mousedown', 'mouseup'];
+    var menuActive = ['click', 'dblclick', 'auxclick', 'contextmenu'];
+    for (var mi = 0; mi < menuPassive.length; mi++) {
+      window.addEventListener(menuPassive[mi], onMenuEvent, { capture: true, passive: true });
+    }
+    for (mi = 0; mi < menuActive.length; mi++) {
+      window.addEventListener(menuActive[mi], onMenuEvent, { capture: true, passive: false });
+    }
+    document.addEventListener('scroll', onMenuScroll, { capture: true, passive: true });
+    window.addEventListener('resize', safe(hideMenu), { passive: true });
     document.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('resize', onResize, { passive: true });
     document.addEventListener(

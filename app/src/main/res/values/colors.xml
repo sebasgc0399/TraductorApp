@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Deep indigo from the launcher icon gradient (ic_launcher_background end color). -->
+    <color name="splash_background">#FF21136B</color>
+</resources>

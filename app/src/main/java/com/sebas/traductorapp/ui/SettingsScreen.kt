@@ -1,5 +1,11 @@
 package com.sebas.traductorapp.ui
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Typeface
+import android.os.Build
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -46,12 +53,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sebas.traductorapp.AppContainer
 import com.sebas.traductorapp.data.AppSettings
@@ -128,6 +140,16 @@ private fun SettingsContent(
     var cacheBytes by remember { mutableStateOf<Long?>(null) }
     var cacheVersion by remember { mutableIntStateOf(0) }
     var confirm by remember { mutableStateOf<SettingsConfirmAction?>(null) }
+    var fontScale by remember { mutableFloatStateOf(s.fontScale) }
+    val context = LocalContext.current
+    val appVersion = remember { settingsAppVersion(context) }
+    val bubbleFont = remember { settingsBubbleFont(context) }
+
+    fun openLink(url: String) {
+        if (!openExternalUrl(context, url)) {
+            scope.launch { snackbar.showSnackbar("No se encontró un navegador para abrir el enlace.") }
+        }
+    }
 
     // El tamaño de la caché se calcula fuera del hilo principal.
     LaunchedEffect(cacheVersion) {
@@ -187,6 +209,11 @@ private fun SettingsContent(
                     color = MaterialTheme.colorScheme.error,
                 )
                 else -> Text("Sin guardar", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (!s.hasApiKey) {
+            TextButton(onClick = { openLink(OPENAI_API_KEYS_URL) }) {
+                Text("¿No tienes una? Crear una API key")
             }
         }
 
@@ -259,6 +286,48 @@ private fun SettingsContent(
                 }
             }
         }
+
+        HorizontalDivider()
+
+        // --- Tamaño de letra ---
+        SettingsSectionTitle("Tamaño de letra de los globos")
+        Text("Tamaño: ${(fontScale * 100).roundToInt()} %")
+        Slider(
+            value = fontScale,
+            onValueChange = { fontScale = roundSettingsFontScale(it) },
+            valueRange = AppSettings.MIN_FONT_SCALE..AppSettings.MAX_FONT_SCALE,
+            // Pasos de 0,05 entre 0,8 y 1,3: 11 valores, 9 intermedios.
+            steps = 9,
+            onValueChangeFinished = {
+                val value = fontScale
+                scope.launch { repo.setFontScale(value) }
+            },
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "¡No puedo creer que hayas vuelto!",
+                modifier = Modifier
+                    .background(Color.White, RoundedCornerShape(28.dp))
+                    .border(2.dp, Color.Black, RoundedCornerShape(28.dp))
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                color = Color.Black,
+                fontSize = (SETTINGS_PREVIEW_FONT_SP * fontScale).sp,
+                lineHeight = (SETTINGS_PREVIEW_FONT_SP * fontScale * 1.2f).sp,
+                fontFamily = bubbleFont,
+                textAlign = TextAlign.Center,
+            )
+        }
+        Text(
+            "Cambia el tamaño del texto traducido. Si no cabe en el globo, se reduce automáticamente.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         HorizontalDivider()
 
@@ -335,8 +404,33 @@ private fun SettingsContent(
 
         HorizontalDivider()
 
+        // --- Acerca de ---
+        SettingsSectionTitle("Acerca de")
         Text(
-            "gpt-6-luna: ~0.002 USD por capítulo",
+            if (appVersion.isNotBlank()) "TraductorApp $appVersion" else "TraductorApp",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Text(
+            "Código abierto (licencia MIT). Con gpt-6-luna cuesta ≈ 0,001 USD por capítulo, " +
+                "que se cobran a tu cuenta de OpenAI.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(
+            onClick = { openLink(GITHUB_RELEASES_URL) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Buscar actualizaciones") }
+        OutlinedButton(
+            onClick = { openLink(GITHUB_REPO_URL) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Código fuente") }
+        OutlinedButton(
+            onClick = { scope.launch { repo.setOnboardingDone(false) } },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Ver bienvenida otra vez") }
+        Text(
+            "TraductorApp no aloja ningún contenido: solo traduce lo que abres. " +
+                "Apoya a los autores leyendo las versiones oficiales cuando puedas.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -386,3 +480,27 @@ private fun SettingsSwitchRow(text: String, checked: Boolean, onChange: (Boolean
 
 private fun formatSettingsMb(bytes: Long): String =
     String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+
+/** Tamaño base (sp) de la vista previa del globo, antes de aplicar la escala. */
+private const val SETTINGS_PREVIEW_FONT_SP = 18f
+
+/** Redondea al múltiplo de 0,05 más cercano dentro del rango permitido. */
+private fun roundSettingsFontScale(value: Float): Float =
+    ((value * 20f).roundToInt() / 20f).coerceIn(AppSettings.MIN_FONT_SCALE, AppSettings.MAX_FONT_SCALE)
+
+/** versionName del APK instalado (la sobrecarga con int está obsoleta desde Android 13). */
+@Suppress("DEPRECATION")
+private fun settingsAppVersion(context: Context): String = runCatching {
+    val pm = context.packageManager
+    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0L))
+    } else {
+        pm.getPackageInfo(context.packageName, 0)
+    }
+    info.versionName.orEmpty()
+}.getOrDefault("")
+
+/** La misma fuente que usa el lector sobre los globos; si falla, la del sistema. */
+private fun settingsBubbleFont(context: Context): FontFamily =
+    runCatching { FontFamily(Typeface.createFromAsset(context.assets, "fonts/ComicNeue-Bold.ttf")) }
+        .getOrDefault(FontFamily.Default)

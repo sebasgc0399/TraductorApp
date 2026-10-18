@@ -18,6 +18,13 @@ interface SeriesDao {
     @Query("SELECT * FROM series ORDER BY updatedAt DESC LIMIT :limit")
     fun observeRecent(limit: Int = 30): Flow<List<SeriesEntity>>
 
+    /** Biblioteca: favoritas primero y luego por lectura más reciente. */
+    @Query("SELECT * FROM series ORDER BY favorite DESC, updatedAt DESC LIMIT :limit")
+    fun observeLibrary(limit: Int = 100): Flow<List<SeriesEntity>>
+
+    @Query("UPDATE series SET favorite = :favorite WHERE `key` = :key")
+    suspend fun setFavorite(key: String, favorite: Boolean)
+
     @Upsert
     suspend fun upsert(series: SeriesEntity)
 

@@ -1,5 +1,6 @@
 package com.sebas.traductorapp.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -14,6 +15,9 @@ data class SeriesEntity(
     val summary: String = "",
     val lastUrl: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Marcada como favorita en la biblioteca. El default coincide con la migración 1→2. */
+    @ColumnInfo(defaultValue = "0")
+    val favorite: Boolean = false,
 )
 
 /** OCR ya hecho de una imagen (por URL). Releer un capítulo no vuelve a correr el OCR. */

@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.TraductorApp" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.TraductorApp" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Android 12+ platform splash screen (minSdk 31, no compat library needed) -->
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
 </resources>

@@ -8,3 +8,8 @@ local.properties
 captures/
 .cxx/
 .externalNativeBuild/
+
+# Firma del release (nunca al repo)
+keystore.properties
+*.jks
+*.keystore
